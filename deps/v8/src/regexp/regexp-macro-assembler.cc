@@ -134,6 +134,9 @@ const byte* NativeRegExpMacroAssembler::StringCharacterPosition(
     start_index += SlicedString::cast(subject)->offset();
     subject = SlicedString::cast(subject)->parent();
   }
+  if (subject->IsThinString()) {
+    subject = ThinString::cast(subject)->actual();
+  }
   DCHECK(start_index >= 0);
   DCHECK(start_index <= subject->length());
   if (subject->IsSeqOneByteString()) {
@@ -146,6 +149,7 @@ const byte* NativeRegExpMacroAssembler::StringCharacterPosition(
     return reinterpret_cast<const byte*>(
         ExternalOneByteString::cast(subject)->GetChars() + start_index);
   } else {
+    DCHECK(subject->IsExternalTwoByteString());
     return reinterpret_cast<const byte*>(
         ExternalTwoByteString::cast(subject)->GetChars() + start_index);
   }
@@ -166,15 +170,18 @@ int NativeRegExpMacroAssembler::CheckStackGuardState(
   bool is_one_byte = subject_handle->IsOneByteRepresentationUnderneath();
 
   StackLimitCheck check(isolate);
-  if (check.JsHasOverflowed()) {
+  bool js_has_overflowed = check.JsHasOverflowed();
+
+  if (is_direct_call) {
+    // Direct calls from JavaScript can be interrupted in two ways:
+    // 1. A real stack overflow, in which case we let the caller throw the
+    //    exception.
+    // 2. The stack guard was used to interrupt execution for another purpose,
+    //    forcing the call through the runtime system.
+    return_value = js_has_overflowed ? EXCEPTION : RETRY;
+  } else if (js_has_overflowed) {
     isolate->StackOverflow();
     return_value = EXCEPTION;
-  } else if (is_direct_call) {
-    // If not real stack overflow the stack guard was used to interrupt
-    // execution for another purpose.  If this is a direct call from JavaScript
-    // retry the RegExp forcing the call through the runtime system.
-    // Currently the direct call cannot handle a GC.
-    return_value = RETRY;
   } else {
     Object* result = isolate->stack_guard()->HandleInterrupts();
     if (result->IsException(isolate)) return_value = EXCEPTION;
@@ -238,6 +245,9 @@ NativeRegExpMacroAssembler::Result NativeRegExpMacroAssembler::Match(
     SlicedString* slice = SlicedString::cast(subject_ptr);
     subject_ptr = slice->parent();
     slice_offset = slice->offset();
+  }
+  if (StringShape(subject_ptr).IsThin()) {
+    subject_ptr = ThinString::cast(subject_ptr)->actual();
   }
   // Ensure that an underlying string has the same representation.
   bool is_one_byte = subject_ptr->IsOneByteRepresentation();
